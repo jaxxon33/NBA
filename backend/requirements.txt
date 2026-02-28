@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+requests
+beautifulsoup4
+pandas
+scikit-learn
+xgboost
+numpy
+joblib
+python-dotenv
+psycopg2-binary
+nba_api
