@@ -27,6 +27,9 @@ class BetBase(BaseModel):
     ev_percentage: float
     is_value_bet: bool
     bookmaker: str
+    match_date: Optional[datetime.datetime] = None
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
 
 class BetCreate(BetBase):
     pass

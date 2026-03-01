@@ -95,7 +95,7 @@ export default function Matches() {
                                         <span className="vs">vs</span>
                                         <span className="team">{match.away_team}</span>
                                     </div>
-                                    <div className="match-venue">{match.venue}</div>
+                                    <div className="match-venue">{new Date(match.match_date).toLocaleDateString()} &middot; {match.venue}</div>
                                 </div>
                             ))
                         )}

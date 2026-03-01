@@ -117,7 +117,20 @@ def get_matches(db: Session = Depends(get_db)):
 
 @app.get("/api/bets/ev", response_model=list[schemas.Bet])
 def get_ev_bets(db: Session = Depends(get_db)):
-    return db.query(models.Bet).filter(models.Bet.is_value_bet == True).order_by(models.Bet.ev_percentage.desc()).all()
+    ev_bets = db.query(models.Bet, models.Match)\
+                .join(models.Match, models.Bet.match_id == models.Match.id)\
+                .filter(models.Bet.is_value_bet == True)\
+                .order_by(models.Bet.ev_percentage.desc()).all()
+    
+    out = []
+    for bet, match in ev_bets:
+        bet_data = bet.__dict__.copy()
+        bet_data["match_date"] = match.match_date
+        bet_data["home_team"] = match.home_team
+        bet_data["away_team"] = match.away_team
+        out.append(bet_data)
+        
+    return out
 
 @app.get("/api/stats", response_model=schemas.DashboardStats)
 def get_stats(db: Session = Depends(get_db)):

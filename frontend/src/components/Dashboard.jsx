@@ -129,6 +129,9 @@ export default function Dashboard() {
                         sortedBets.map((bet) => (
                             <div key={bet.id} className="ev-card">
                                 <div className="ev-match-info">
+                                    <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                                        {bet.home_team} vs {bet.away_team} &middot; {new Date(bet.match_date).toLocaleDateString()}
+                                    </div>
                                     <div className="ev-market">{bet.market}</div>
                                     <div className="ev-match-title">{bet.selection}</div>
                                     <div className="ev-selection">Model Prob: {(bet.model_probability * 100).toFixed(1)}% vs Implied: {((1 / bet.bookmaker_odds) * 100).toFixed(1)}%</div>
