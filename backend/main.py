@@ -48,19 +48,32 @@ def seed_database(db: Session):
             for odd in parsed_odds:
                 match_key = f"{odd['home_team']} _ {odd['away_team']}"
                 if match_key not in unique_matches:
+                    
+                    # Try to parse the real commence time if available 
+                    match_time = datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 4))
+                    if odd.get('commence_time'):
+                        try:
+                            # The Odds API returns ISO 8601 (e.g. 2026-03-01T00:13:00Z)
+                            date_str = odd['commence_time'].replace('Z', '+00:00')
+                            match_time = datetime.datetime.fromisoformat(date_str)
+                        except Exception:
+                            pass
+                            
                     unique_matches[match_key] = {
                         "h_team": odd['home_team'],
-                        "a_team": odd['away_team']
+                        "a_team": odd['away_team'],
+                        "commence_time": match_time
                     }
                     
             upcoming_matches = list(unique_matches.values())
-        except Exception:
+        except Exception as e:
+            print("Error parsing live odds for seeder:", e)
             upcoming_matches = []
             
         # Fallback if the API fails or returns nothing
         if not upcoming_matches:
             teams = ["Boston Celtics", "Miami Heat", "Los Angeles Lakers", "Golden State Warriors", "Denver Nuggets", "Phoenix Suns", "Milwaukee Bucks", "Philadelphia 76ers"]
-            upcoming_matches = [{"h_team": random.sample(teams, 2)[0], "a_team": random.sample(teams, 2)[1]} for _ in range(5)]
+            upcoming_matches = [{"h_team": random.sample(teams, 2)[0], "a_team": random.sample(teams, 2)[1], "commence_time": datetime.datetime.utcnow() + datetime.timedelta(days=1)} for _ in range(5)]
 
         venues = ["TD Garden", "Crypto.com Arena", "Ball Arena", "Kaseya Center", "Chase Center"]
         bookmakers = ["DraftKings", "FanDuel", "BetMGM", "Caesars"]
@@ -68,12 +81,13 @@ def seed_database(db: Session):
         for match_data in upcoming_matches:
             h_team = match_data["h_team"]
             a_team = match_data["a_team"]
+            match_time = match_data.get("commence_time", datetime.datetime.utcnow() + datetime.timedelta(days=1))
             
             match = models.Match(
                 home_team=h_team,
                 away_team=a_team,
                 venue=random.choice(venues),
-                match_date=datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 7)),
+                match_date=match_time,
                 status="upcoming"
             )
             db.add(match)

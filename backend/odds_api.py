@@ -55,12 +55,13 @@ def parse_odds(odds_data):
                 for outcome in market.get('outcomes', []):
                     name = outcome.get('name')
                     price = outcome.get('price')
-                    point = outcome.get('point')
+                    point = outcome.get('point', None)
                     
                     # Example parsed object
                     standardized.append({
                         "home_team": home_team,
                         "away_team": away_team,
+                        "commence_time": game.get('commence_time'), 
                         "bookmaker": bookie_title,
                         "market": market_key,
                         "selection": name,
@@ -80,36 +81,41 @@ def generate_mock_odds():
         ("Denver Nuggets", "Phoenix Suns"),
         ("Milwaukee Bucks", "Philadelphia 76ers")
     ]
+    import datetime
     
-    outcomes = []
+    mock_data = []
+    base_time = datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    
     for h_team, a_team in teams:
+        match_mock = {
+            "home_team": h_team,
+            "away_team": a_team,
+            "commence_time": base_time.isoformat() + "Z",
+            "bookmakers": []
+        }
+        
         for bookie in bookies:
             # H2H Bookie Margin applied
             base_prob = random.uniform(0.4, 0.6)
             h_odds = 1 / (base_prob + 0.05)
             a_odds = 1 / ((1 - base_prob) + 0.05)
             
-            # Add Home Team H2H
-            outcomes.append({
-                "home_team": h_team,
-                "away_team": a_team,
-                "bookmaker": bookie,
-                "market": "h2h",
-                "selection": h_team,
-                "odds": round(h_odds, 2)
+            match_mock["bookmakers"].append({
+                "title": bookie,
+                "markets": [
+                    {
+                        "key": "h2h",
+                        "outcomes": [
+                            {"name": h_team, "price": round(h_odds, 2)},
+                            {"name": a_team, "price": round(a_odds, 2)}
+                        ]
+                    }
+                ]
             })
             
-            # Add Away Team H2H
-            outcomes.append({
-                "home_team": h_team,
-                "away_team": a_team,
-                "bookmaker": bookie,
-                "market": "h2h",
-                "selection": a_team,
-                "odds": round(a_odds, 2)
-            })
-            
-    return [{"bookmakers": [], "home_team": h_team, "away_team": a_team} for h_team, a_team in teams]
+        mock_data.append(match_mock)
+        
+    return mock_data
 
 if __name__ == "__main__":
     odds = fetch_live_odds()
