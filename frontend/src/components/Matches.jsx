@@ -95,7 +95,7 @@ export default function Matches() {
                                         <span className="vs">vs</span>
                                         <span className="team">{match.away_team}</span>
                                     </div>
-                                    <div className="match-venue">{new Date(match.match_date).toLocaleDateString()} &middot; {match.venue}</div>
+                                    <div className="match-venue">{new Date(match.match_date?.split('.')[0]).toLocaleDateString()} &middot; {match.venue}</div>
                                 </div>
                             ))
                         )}
@@ -109,7 +109,7 @@ export default function Matches() {
                             <div className="glass-card" style={{ marginBottom: "1.5rem" }}>
                                 <h2>{selectedMatch.home_team} <span style={{ color: "var(--text-secondary)" }}>vs</span> {selectedMatch.away_team}</h2>
                                 <p style={{ color: "var(--text-secondary)", marginBottom: "1.5rem" }}>
-                                    Match Date: {new Date(selectedMatch.match_date).toLocaleDateString()} &middot; {selectedMatch.venue}
+                                    Match Date: {new Date(selectedMatch.match_date?.split('.')[0]).toLocaleDateString()} &middot; {selectedMatch.venue}
                                 </p>
 
                                 <h3 style={{ marginBottom: "1rem", display: 'flex', alignItems: 'center', gap: '8px' }}>
