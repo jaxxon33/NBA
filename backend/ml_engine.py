@@ -6,16 +6,19 @@ import joblib
 import os
 import hashlib
 import random
+from pathlib import Path
 
-MODEL_PATH = "nba_xgb_model.json"
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "nba_xgb_model.json"
+GAMES_PATH = BASE_DIR / "historical_games.csv"
 
 def load_data():
     """Load pre-downloaded historical CSV data."""
-    if not os.path.exists("historical_games.csv"):
+    if not GAMES_PATH.exists():
         print("Data files not found. Please run data_scraper.py first.")
         return None
         
-    df = pd.read_csv("historical_games.csv")
+    df = pd.read_csv(GAMES_PATH)
     
     # Feature engineering for NBA historical data
     # Derive win/loss target from game results
@@ -99,23 +102,49 @@ def train_model():
     )
     
     model.fit(X_train, y_train)
-    model.save_model(MODEL_PATH)
+    model.save_model(str(MODEL_PATH))
     print("Advanced Model successfully trained and saved!")
+
+def get_data_profile():
+    if not GAMES_PATH.exists():
+        return {"rows": 0, "unique_teams": 0, "unique_matchups": 0, "is_demo_data": True}
+
+    df = pd.read_csv(GAMES_PATH)
+    unique_teams = df['TEAM_NAME'].nunique() if 'TEAM_NAME' in df.columns else 0
+    unique_matchups = df['MATCHUP'].nunique() if 'MATCHUP' in df.columns else 0
+
+    return {
+        "rows": len(df),
+        "unique_teams": int(unique_teams),
+        "unique_matchups": int(unique_matchups),
+        "is_demo_data": len(df) < 1000 or unique_teams < 20 or unique_matchups < 60
+    }
+
+def is_model_ready():
+    """Return True only when the local model/data are broad enough to trust for H2H probabilities."""
+    profile = get_data_profile()
+    return MODEL_PATH.exists() and not profile["is_demo_data"]
+
+def _stable_rng(*parts):
+    seed_input = "|".join(str(part) for part in parts)
+    seed = int(hashlib.sha256(seed_input.encode()).hexdigest()[:16], 16)
+    return random.Random(seed)
 
 def get_live_features(home_team, away_team, venue):
     """Generate the feature vector for a live match"""
     h_id = int(hashlib.sha256(home_team.encode()).hexdigest(), 16) % 30
     a_id = int(hashlib.sha256(away_team.encode()).hexdigest(), 16) % 30
     v_id = int(hashlib.sha256(venue.encode()).hexdigest(), 16) % 30
+    rng = _stable_rng(home_team, away_team, venue)
     
     # In production, these would be queried from a live data feed or injury report API
     home_court_advantage = 1
-    injuries_impact_home = random.uniform(0.8, 1.0)
-    injuries_impact_away = random.uniform(0.8, 1.0)
-    rest_days_home = random.randint(0, 3)
-    rest_days_away = random.randint(0, 3)
-    lineup_strength_home = random.uniform(85, 95)
-    lineup_strength_away = random.uniform(85, 95)
+    injuries_impact_home = rng.uniform(0.8, 1.0)
+    injuries_impact_away = rng.uniform(0.8, 1.0)
+    rest_days_home = rng.randint(0, 3)
+    rest_days_away = rng.randint(0, 3)
+    lineup_strength_home = rng.uniform(85, 95)
+    lineup_strength_away = rng.uniform(85, 95)
     
     return np.array([[
         h_id, a_id, v_id, home_court_advantage,
@@ -126,9 +155,14 @@ def get_live_features(home_team, away_team, venue):
 
 def predict_match(home_team, away_team, venue):
     """Given a home_team and away_team, predict win probabilities."""
+    if not is_model_ready():
+        rng = _stable_rng(home_team, away_team, venue, "baseline")
+        h_prob = rng.uniform(0.45, 0.55)
+        return {"home_prob": h_prob, "away_prob": 1 - h_prob}
+
     try:
         model = XGBClassifier()
-        model.load_model(MODEL_PATH)
+        model.load_model(str(MODEL_PATH))
         
         X_live = get_live_features(home_team, away_team, venue)
         
@@ -138,9 +172,10 @@ def predict_match(home_team, away_team, venue):
             "home_prob": float(prob[1]),
             "away_prob": float(prob[0])
         }
-    except:
-        np.random.seed(int(len(home_team) * len(away_team))) 
-        h_prob = np.random.uniform(0.3, 0.7)
+    except Exception as exc:
+        print(f"Model prediction failed: {exc}. Using deterministic baseline.")
+        rng = _stable_rng(home_team, away_team, venue, "fallback")
+        h_prob = rng.uniform(0.45, 0.55)
         return {"home_prob": h_prob, "away_prob": 1 - h_prob}
 
 def run_monte_carlo_simulation(home_team, away_team, venue, num_simulations=10000):
