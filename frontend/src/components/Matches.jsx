@@ -1,8 +1,21 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts'
 import { Activity, TrendingUp, TrendingDown, Clock } from 'lucide-react'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+
+const createSeededRandom = (seed) => {
+    let state = seed || 1
+    return () => {
+        state = (state * 1664525 + 1013904223) >>> 0
+        return state / 4294967296
+    }
+}
+
+const seedFromMatch = (match) => {
+    const value = `${match.id}-${match.home_team}-${match.away_team}`
+    return [...value].reduce((acc, char) => ((acc * 31) + char.charCodeAt(0)) >>> 0, 7)
+}
 
 export default function Matches() {
     const [matches, setMatches] = useState([])
@@ -31,14 +44,15 @@ export default function Matches() {
     const getTrendData = (match) => {
         if (!match) return []
 
-        let currentHomeProb = 50
+        const random = createSeededRandom(seedFromMatch(match))
+        let currentHomeProb = 50 + (random() * 8 - 4)
         let currentAwayProb = 50
         const data = []
 
         const daysAgo = 7
         for (let i = daysAgo; i >= 0; i--) {
-            // Random walk probability simulation
-            currentHomeProb = currentHomeProb + (Math.random() * 10 - 5)
+            // Demo trend data should remain stable between renders.
+            currentHomeProb = currentHomeProb + (random() * 6 - 3)
             // Clamp
             currentHomeProb = Math.max(10, Math.min(90, currentHomeProb))
             currentAwayProb = 100 - currentHomeProb
@@ -54,7 +68,10 @@ export default function Matches() {
         return data
     }
 
-    const trendData = selectedMatch ? getTrendData(selectedMatch) : []
+    const trendData = useMemo(
+        () => selectedMatch ? getTrendData(selectedMatch) : [],
+        [selectedMatch]
+    )
 
     if (loading) {
         return (
