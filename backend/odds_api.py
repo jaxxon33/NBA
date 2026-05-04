@@ -5,7 +5,7 @@ import random
 
 # Theoretical The-Odds-API (Example integration)
 # https://the-odds-api.com/
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "eef026b080447d850bf986dd507f8024")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
 
 def fetch_live_odds():
@@ -13,7 +13,10 @@ def fetch_live_odds():
     Fetches real-time odds from multiple Australian bookmakers.
     Uses The Odds API or any other live feed.
     """
-    
+    if not ODDS_API_KEY:
+        print("ODDS_API_KEY is not configured. Using fallback mocked odds builder.")
+        return generate_mock_odds()
+
     params = {
         'apiKey': ODDS_API_KEY,
         'regions': 'au',
@@ -22,12 +25,12 @@ def fetch_live_odds():
     }
     
     try:
-        response = requests.get(ODDS_URL, params=params)
+        response = requests.get(ODDS_URL, params=params, timeout=10)
         
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 401:
-            print("API Key invalid or missing. Using fallback mocked odds builder.")
+            print("Odds API key invalid. Using fallback mocked odds builder.")
             return generate_mock_odds()
         else:
             print(f"Error fetching odds: {response.status_code}")
@@ -45,6 +48,8 @@ def parse_odds(odds_data):
     for game in odds_data:
         home_team = game.get('home_team')
         away_team = game.get('away_team')
+        if not home_team or not away_team:
+            continue
         
         for bookmaker in game.get('bookmakers', []):
             bookie_title = bookmaker.get('title') # "TAB", "Sportsbet", etc.
@@ -56,6 +61,8 @@ def parse_odds(odds_data):
                     name = outcome.get('name')
                     price = outcome.get('price')
                     point = outcome.get('point', None)
+                    if not name or price is None:
+                        continue
                     
                     # Example parsed object
                     standardized.append({
