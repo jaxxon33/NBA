@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from 'recharts'
-import { Activity, Award, Clock, Layers } from 'lucide-react'
+import { Clock, Layers, TrendingUp } from 'lucide-react'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
 
@@ -17,11 +16,9 @@ export default function Matches() {
                 const res = await fetch(`${API_BASE}/matches`)
                 const data = await res.json()
                 setMatches(data)
-                if (data.length > 0) {
-                    setSelectedId(data[0].id)
-                }
+                if (data.length > 0) setSelectedId(data[0].id)
             } catch (e) {
-                console.error("Error fetching matches", e)
+                console.error('Error fetching matches', e)
             } finally {
                 setLoading(false)
             }
@@ -36,14 +33,13 @@ export default function Matches() {
         fetch(`${API_BASE}/matches/${selectedId}/odds`)
             .then(r => r.json())
             .then(d => { if (!cancelled) setDetail(d) })
-            .catch(e => console.error("Error fetching match odds", e))
+            .catch(e => console.error('Error fetching match odds', e))
             .finally(() => { if (!cancelled) setLoadingDetail(false) })
         return () => { cancelled = true }
     }, [selectedId])
 
     const selectedMatch = matches.find(m => m.id === selectedId)
 
-    // Group outcomes by market for tidy presentation.
     const groupedOutcomes = useMemo(() => {
         if (!detail?.outcomes) return {}
         const out = {}
@@ -65,18 +61,19 @@ export default function Matches() {
 
     return (
         <div className="matches-page">
-            <div className="header-actions" style={{ marginBottom: "2rem" }}>
+            <div className="header-actions" style={{ marginBottom: '2rem' }}>
                 <div>
-                    <h1>Matches <span className="neon-cyan-text">& Market Spread</span></h1>
-                    <p style={{ color: "var(--text-secondary)", marginTop: "0.5rem" }}>
-                        Real bookmaker prices for each market. Sharp consensus probability highlighted; best available price flagged per outcome.
+                    <h1>Matches <span className="neon-cyan-text">&amp; Market Transparency</span></h1>
+                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                        Full odds breakdown per bookmaker. Vig removed to show each book's fair probability estimate.
+                        Sharp books are the reference for EV calculation.
                     </p>
                 </div>
             </div>
 
             <div className="layout-grid">
                 <div className="matches-list glass-card">
-                    <h3 style={{ marginBottom: "1rem" }}>
+                    <h3 style={{ marginBottom: '1rem' }}>
                         <Clock size={18} style={{ display: 'inline', marginRight: '8px', verticalAlign: 'middle' }} />
                         Upcoming Matches
                     </h3>
@@ -114,11 +111,23 @@ export default function Matches() {
                         </div>
                     ) : (
                         <>
-                            <div className="glass-card" style={{ marginBottom: "1.5rem" }}>
-                                <h2>{selectedMatch.home_team} <span style={{ color: "var(--text-secondary)" }}>vs</span> {selectedMatch.away_team}</h2>
-                                <p style={{ color: "var(--text-secondary)", marginBottom: 0 }}>
+                            <div className="glass-card" style={{ marginBottom: '1.5rem' }}>
+                                <h2>
+                                    {selectedMatch.home_team}{' '}
+                                    <span style={{ color: 'var(--text-secondary)' }}>vs</span>{' '}
+                                    {selectedMatch.away_team}
+                                </h2>
+                                <p style={{ color: 'var(--text-secondary)', marginBottom: '0.8rem' }}>
                                     {new Date(selectedMatch.match_date?.split('.')[0]).toLocaleString()} · {selectedMatch.venue}
                                 </p>
+                                {detail.sharp_books && (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+                                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Sharp reference books:</span>
+                                        {detail.sharp_books.map(bk => (
+                                            <span key={bk} className="book-pill book-pill-sharp">{bk}</span>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
 
                             {Object.keys(groupedOutcomes).length === 0 ? (
@@ -167,70 +176,123 @@ function MarketSections({ grouped }) {
 
 function OutcomeBlock({ outcome }) {
     const sharpPct = outcome.sharp_probability ? outcome.sharp_probability * 100 : null
-    const chartData = outcome.books.map(b => ({
-        bookmaker: b.bookmaker,
-        odds: b.odds,
-        impliedPct: b.implied_probability ? b.implied_probability * 100 : 0,
-        evPct: b.ev_percentage,
-        isValue: b.is_value_bet,
-    }))
 
     return (
-        <div style={{ marginBottom: '1.5rem', paddingBottom: '1rem', borderBottom: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+        <div style={{ marginBottom: '2rem', paddingBottom: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
+            {/* Outcome header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
                 <div>
-                    <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>{outcome.selection}</div>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 600 }}>{outcome.selection}</div>
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: '3px' }}>
                         {sharpPct !== null ? (
-                            <>Sharp consensus: <span className="neon-cyan-text mono-text">{sharpPct.toFixed(1)}%</span></>
-                        ) : 'No sharp reference'}
+                            <>
+                                Sharp consensus (devigged avg):&nbsp;
+                                <span className="neon-cyan-text mono-text" style={{ fontWeight: 700 }}>{sharpPct.toFixed(2)}%</span>
+                                &nbsp;· Best price:&nbsp;
+                                <span style={{ color: 'var(--accent-primary)' }}>{outcome.best_price.toFixed(2)}</span>
+                                &nbsp;@&nbsp;{outcome.best_book}
+                            </>
+                        ) : 'No sharp reference available'}
                     </div>
                 </div>
-                <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                        <Award size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '3px' }} />
-                        Best price
-                    </div>
-                    <div className="mono-text" style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--accent-primary)' }}>
-                        {outcome.best_price.toFixed(2)}
-                    </div>
-                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{outcome.best_book}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <TrendingUp size={14} style={{ color: 'var(--accent-primary)' }} />
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                        {outcome.books.filter(b => b.is_value_bet).length} value bet{outcome.books.filter(b => b.is_value_bet).length !== 1 ? 's' : ''} found
+                    </span>
                 </div>
             </div>
 
-            <div style={{ height: Math.max(60, chartData.length * 22), width: '100%' }}>
-                <ResponsiveContainer>
-                    <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 50, left: 70, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" horizontal={false} />
-                        <XAxis type="number" stroke="var(--text-secondary)" tick={{ fontSize: 11 }} domain={[0, 'dataMax + 5']} unit="%" />
-                        <YAxis type="category" dataKey="bookmaker" stroke="var(--text-secondary)" tick={{ fontSize: 11 }} width={70} />
-                        <Tooltip
-                            contentStyle={{ backgroundColor: 'var(--bg-card)', border: '1px solid #333', borderRadius: '8px', fontSize: '0.85rem' }}
-                            formatter={(value, name, props) => {
-                                if (name === 'impliedPct') {
-                                    return [
-                                        `${value.toFixed(1)}% (odds ${props.payload.odds.toFixed(2)}, EV ${props.payload.evPct > 0 ? '+' : ''}${props.payload.evPct}%)`,
-                                        'Implied'
-                                    ]
-                                }
-                                return [value, name]
-                            }}
-                        />
-                        {sharpPct !== null && (
-                            <ReferenceLine x={sharpPct} stroke="#00ff88" strokeDasharray="4 2" label={{ value: 'Sharp', fill: '#00ff88', fontSize: 11, position: 'top' }} />
-                        )}
-                        <Bar dataKey="impliedPct" radius={[0, 4, 4, 0]}>
-                            {chartData.map((entry, idx) => (
-                                <Cell
-                                    key={idx}
-                                    fill={entry.isValue ? '#00ff88' : entry.evPct > 0 ? '#5fc88d' : '#5a5a8a'}
-                                    opacity={entry.isValue ? 1 : 0.65}
-                                />
-                            ))}
-                        </Bar>
-                    </BarChart>
-                </ResponsiveContainer>
+            {/* Methodology note */}
+            <div className="methodology-note">
+                <strong>How to read this table:</strong> Implied% = raw 1/odds (includes vig).
+                Devigged% = implied ÷ overround (vig removed — this book's fair probability estimate).
+                EV% = (sharp_prob × odds − 1) × 100. Green rows beat the sharp consensus.
             </div>
+
+            {/* Book comparison table */}
+            <div className="odds-table-wrap">
+                <table className="odds-table">
+                    <thead>
+                        <tr>
+                            <th>Bookmaker</th>
+                            <th>Type</th>
+                            <th className="num-col">Odds</th>
+                            <th className="num-col">Vig</th>
+                            <th className="num-col">Implied%</th>
+                            <th className="num-col">Devigged%</th>
+                            <th className="num-col">EV%</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {outcome.books.map((book, idx) => {
+                            const vigPct = book.overround ? (book.overround - 1) * 100 : null
+                            const impliedPct = book.implied_probability ? book.implied_probability * 100 : null
+                            const deviggPct = book.devigged_probability ? book.devigged_probability * 100 : null
+                            const isValue = book.is_value_bet
+                            const sharpDiff = sharpPct !== null && deviggPct !== null ? deviggPct - sharpPct : null
+
+                            return (
+                                <tr
+                                    key={idx}
+                                    className={isValue ? 'row-value' : book.is_sharp ? 'row-sharp' : ''}
+                                >
+                                    <td>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span>{book.bookmaker}</span>
+                                            {isValue && <span className="badge-value">+EV</span>}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <span className={book.is_sharp ? 'book-pill book-pill-sharp' : 'book-pill book-pill-rec'}>
+                                            {book.is_sharp ? 'SHARP' : 'REC'}
+                                        </span>
+                                    </td>
+                                    <td className="num-col mono-text" style={{ color: isValue ? 'var(--accent-primary)' : 'inherit', fontWeight: isValue ? 700 : 400 }}>
+                                        {book.odds.toFixed(2)}
+                                    </td>
+                                    <td className="num-col" style={{ color: vigPct > 5 ? '#ff8866' : vigPct > 2 ? '#ffcc44' : '#88cc88' }}>
+                                        {vigPct !== null ? `+${vigPct.toFixed(1)}%` : '—'}
+                                    </td>
+                                    <td className="num-col">
+                                        {impliedPct !== null ? `${impliedPct.toFixed(2)}%` : '—'}
+                                    </td>
+                                    <td className="num-col mono-text">
+                                        {deviggPct !== null ? (
+                                            <span>
+                                                {deviggPct.toFixed(2)}%
+                                                {sharpDiff !== null && (
+                                                    <span style={{ fontSize: '0.75rem', marginLeft: '4px', color: Math.abs(sharpDiff) < 0.5 ? 'var(--text-secondary)' : sharpDiff > 0 ? '#ff8866' : '#88cc88' }}>
+                                                        ({sharpDiff > 0 ? '+' : ''}{sharpDiff.toFixed(1)}pp)
+                                                    </span>
+                                                )}
+                                            </span>
+                                        ) : '—'}
+                                    </td>
+                                    <td className="num-col mono-text" style={{ fontWeight: 600, color: book.ev_percentage > 0 ? '#00ff88' : 'var(--text-secondary)' }}>
+                                        {book.ev_percentage > 0 ? '+' : ''}{book.ev_percentage?.toFixed(2)}%
+                                    </td>
+                                </tr>
+                            )
+                        })}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Sharp consensus explainer row */}
+            {sharpPct !== null && (
+                <div style={{ marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+                    <span>
+                        Sharp consensus: <span className="neon-cyan-text mono-text">{sharpPct.toFixed(2)}%</span>
+                    </span>
+                    <span>
+                        Fair decimal odds: <span className="mono-text">{(100 / sharpPct).toFixed(3)}</span>
+                    </span>
+                    <span>
+                        Best available: <span className="mono-text" style={{ color: 'var(--accent-primary)' }}>{outcome.best_price.toFixed(2)}</span> @ {outcome.best_book}
+                    </span>
+                </div>
+            )}
         </div>
     )
 }

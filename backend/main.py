@@ -392,24 +392,37 @@ def get_match_odds(match_id: int, db: Session = Depends(get_db)):
 
     bets = db.query(models.Bet).filter(models.Bet.match_id == match_id).all()
 
-    # Group bets by (market, selection) for compact display.
+    # Step 1 — compute per-(bookmaker, market) sum of raw implied probabilities.
+    # This gives each book's overround for each market (e.g. 1.054 = 5.4% margin).
+    book_mkt_sum = defaultdict(float)
+    for bet in bets:
+        if bet.bookmaker_odds and bet.bookmaker_odds > 1:
+            book_mkt_sum[(bet.bookmaker, bet.market)] += 1.0 / bet.bookmaker_odds
+
+    # Step 2 — build per-outcome lists with transparency fields.
     by_outcome = defaultdict(list)
     for bet in bets:
+        if not bet.bookmaker_odds or bet.bookmaker_odds <= 1:
+            continue
+        implied = round(1.0 / bet.bookmaker_odds, 4)
+        overround = round(book_mkt_sum.get((bet.bookmaker, bet.market), 1.0), 4)
+        # This book's own fair probability estimate after removing their margin.
+        devigged = round(implied / overround, 4) if overround > 0 else implied
         by_outcome[(bet.market, bet.selection)].append({
             "bookmaker": bet.bookmaker,
             "odds": bet.bookmaker_odds,
             "ev_percentage": bet.ev_percentage,
             "is_value_bet": bet.is_value_bet,
             "model_probability": bet.model_probability,
-            "implied_probability": round(1.0 / bet.bookmaker_odds, 4) if bet.bookmaker_odds else None,
+            "implied_probability": implied,
+            "devigged_probability": devigged,
+            "overround": overround,
+            "is_sharp": bet.bookmaker in SHARP_BOOKS,
         })
 
     outcomes = []
     for (market, selection), books in by_outcome.items():
-        # Best price = highest decimal odds available.
         best = max(books, key=lambda b: b["odds"])
-        # Sharp consensus is the same model_probability across rows (sharp-derived);
-        # take the median to be robust against any outliers.
         probs = sorted(b["model_probability"] for b in books if b["model_probability"] is not None)
         sharp_prob = probs[len(probs)//2] if probs else None
         outcomes.append({
@@ -418,7 +431,7 @@ def get_match_odds(match_id: int, db: Session = Depends(get_db)):
             "sharp_probability": sharp_prob,
             "best_price": best["odds"],
             "best_book": best["bookmaker"],
-            "books": sorted(books, key=lambda b: -b["odds"]),
+            "books": sorted(books, key=lambda b: (-b["is_sharp"], -b["odds"])),
         })
 
     outcomes.sort(key=lambda o: (o["market"], o["selection"]))
@@ -433,6 +446,7 @@ def get_match_odds(match_id: int, db: Session = Depends(get_db)):
             "status": match.status,
         },
         "outcomes": outcomes,
+        "sharp_books": sorted(SHARP_BOOKS),
     }
 
 @app.get("/api/bets/ev", response_model=list[schemas.Bet])

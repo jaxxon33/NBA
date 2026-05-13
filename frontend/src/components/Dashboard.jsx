@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useSettings, kellyStake } from '../useSettings'
+import { ChevronDown, ChevronUp } from 'lucide-react'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+
+const SHARP_BOOKS = ['Betfair', 'Pinnacle', 'LowVig.ag', 'BetOnline.ag', 'Circa Sports']
 
 export default function Dashboard() {
     const settings = useSettings()
@@ -10,18 +13,18 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(true)
     const [simulating, setSimulating] = useState(false)
     const [sortBy, setSortBy] = useState('ev_desc')
+    const [expandedId, setExpandedId] = useState(null)
 
     const fetchData = async () => {
         try {
-            const statsRes = await fetch(`${API_BASE}/stats`)
-            const statsData = await statsRes.json()
-            setStats(statsData)
-
-            const betsRes = await fetch(`${API_BASE}/bets/ev`)
-            const betsData = await betsRes.json()
-            setEvBets(betsData)
+            const [statsRes, betsRes] = await Promise.all([
+                fetch(`${API_BASE}/stats`),
+                fetch(`${API_BASE}/bets/ev`),
+            ])
+            setStats(await statsRes.json())
+            setEvBets(await betsRes.json())
         } catch (e) {
-            console.error("Error fetching data", e)
+            console.error('Error fetching data', e)
         } finally {
             setLoading(false)
         }
@@ -37,12 +40,9 @@ export default function Dashboard() {
         setSimulating(true)
         try {
             await fetch(`${API_BASE}/run-simulation`, { method: 'POST' })
-            setTimeout(() => {
-                fetchData()
-                setSimulating(false)
-            }, 2500)
+            setTimeout(() => { fetchData(); setSimulating(false) }, 2500)
         } catch (e) {
-            console.error("Simulation failed", e)
+            console.error('Simulation failed', e)
             setSimulating(false)
         }
     }
@@ -56,7 +56,6 @@ export default function Dashboard() {
         )
     }
 
-    // Apply user's threshold filter on top of the backend's value-bet flag.
     const filtered = evBets.filter(b => b.ev_percentage >= settings.minEV)
 
     const sortedBets = [...filtered].sort((a, b) => {
@@ -64,9 +63,8 @@ export default function Dashboard() {
         if (sortBy === 'odds_desc') return b.bookmaker_odds - a.bookmaker_odds
         if (sortBy === 'prob_desc') return b.model_probability - a.model_probability
         if (sortBy === 'stake_desc') {
-            const aStake = kellyStake(a.model_probability, a.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
-            const bStake = kellyStake(b.model_probability, b.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
-            return bStake - aStake
+            return kellyStake(b.model_probability, b.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
+                 - kellyStake(a.model_probability, a.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
         }
         return 0
     })
@@ -76,21 +74,13 @@ export default function Dashboard() {
             <div className="header-actions">
                 <div>
                     <h1>+EV Identification <span className="neon-cyan-text">Live Feed V2</span></h1>
-                    <p style={{ color: "var(--text-secondary)", marginTop: "0.5rem", maxWidth: '720px' }}>
-                        Sharp-consensus methodology. Every AU/US bookmaker quote is scored against devigged prices
-                        from Betfair Exchange, LowVig.ag, and BetOnline.ag. Showing edges above your {settings.minEV.toFixed(1)}% threshold.
+                    <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem', maxWidth: '720px' }}>
+                        Sharp-consensus methodology. Every bookmaker quote is scored against devigged prices
+                        from {SHARP_BOOKS.join(', ')}. Showing edges above your {settings.minEV.toFixed(1)}% threshold.
                     </p>
                 </div>
-                <button
-                    className="btn btn-primary"
-                    onClick={runSimulation}
-                    disabled={simulating}
-                >
-                    {simulating ? (
-                        <><span className="spinner"></span> Refreshing Markets…</>
-                    ) : (
-                        '↻ Refresh Odds & EV'
-                    )}
+                <button className="btn btn-primary" onClick={runSimulation} disabled={simulating}>
+                    {simulating ? <><span className="spinner"></span> Refreshing Markets…</> : '↻ Refresh Odds & EV'}
                 </button>
             </div>
 
@@ -102,7 +92,9 @@ export default function Dashboard() {
                 <div className="glass-card">
                     <div className="stat-label">Average +EV (Shown)</div>
                     <div className="stat-value gradient-text">
-                        +{filtered.length > 0 ? (filtered.reduce((s, b) => s + b.ev_percentage, 0) / filtered.length).toFixed(2) : '0.00'}%
+                        +{filtered.length > 0
+                            ? (filtered.reduce((s, b) => s + b.ev_percentage, 0) / filtered.length).toFixed(2)
+                            : '0.00'}%
                     </div>
                 </div>
                 <div className="glass-card">
@@ -112,20 +104,17 @@ export default function Dashboard() {
             </div>
 
             <div className="glass-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: "1.5rem", flexWrap: 'wrap', gap: '12px' }}>
-                    <h3>Sharp-Edge Bets</h3>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '12px' }}>
+                    <div>
+                        <h3>Sharp-Edge Bets</h3>
+                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '4px' }}>
+                            Click any bet to see the full calculation breakdown.
+                        </p>
+                    </div>
                     <select
                         value={sortBy}
                         onChange={(e) => setSortBy(e.target.value)}
-                        style={{
-                            background: 'var(--bg-tertiary)',
-                            color: 'var(--text-primary)',
-                            border: '1px solid var(--border-color)',
-                            padding: '0.4rem 0.8rem',
-                            borderRadius: '8px',
-                            outline: 'none',
-                            cursor: 'pointer'
-                        }}
+                        style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', padding: '0.4rem 0.8rem', borderRadius: '8px', outline: 'none', cursor: 'pointer' }}
                     >
                         <option value="ev_desc">Highest +EV First</option>
                         <option value="stake_desc">Largest Kelly Stake</option>
@@ -145,41 +134,140 @@ export default function Dashboard() {
                             </p>
                         </div>
                     ) : (
-                        sortedBets.map((bet) => {
-                            const stake = kellyStake(bet.model_probability, bet.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
-                            const impliedPct = (1 / bet.bookmaker_odds) * 100
-                            const sharpPct = bet.model_probability * 100
-                            return (
-                                <div key={bet.id} className="ev-card">
-                                    <div className="ev-match-info">
-                                        <div style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginBottom: "4px" }}>
-                                            {bet.home_team} vs {bet.away_team} · {new Date(bet.match_date?.split('.')[0]).toLocaleDateString()}
-                                        </div>
-                                        <div className="ev-market">{bet.market}</div>
-                                        <div className="ev-match-title">{bet.selection}</div>
-                                        <div className="ev-selection" style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
-                                            <span>Sharp: <strong>{sharpPct.toFixed(1)}%</strong></span>
-                                            <span style={{ color: 'var(--text-secondary)' }}>Implied: {impliedPct.toFixed(1)}%</span>
-                                            {stake > 0 && (
-                                                <span style={{ color: '#8884d8' }}>Kelly: <strong>${stake.toFixed(2)}</strong></span>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="ev-odds-col">
-                                        <div className="ev-odds">{bet.bookmaker_odds.toFixed(2)}</div>
-                                        <div className="ev-bookie">{bet.bookmaker}</div>
-                                    </div>
-
-                                    <div className="ev-percentage">
-                                        +{bet.ev_percentage}%
-                                    </div>
-                                </div>
-                            )
-                        })
+                        sortedBets.map((bet) => <BetCard key={bet.id} bet={bet} settings={settings} expanded={expandedId === bet.id} onToggle={() => setExpandedId(expandedId === bet.id ? null : bet.id)} />)
                     )}
                 </div>
             </div>
+        </div>
+    )
+}
+
+function BetCard({ bet, settings, expanded, onToggle }) {
+    const stake = kellyStake(bet.model_probability, bet.bookmaker_odds, settings.bankroll, settings.kellyMultiplier)
+    const impliedPct = (1 / bet.bookmaker_odds) * 100
+    const sharpPct = bet.model_probability * 100
+    const edge = sharpPct - impliedPct
+
+    // Kelly formula components
+    const b = bet.bookmaker_odds - 1
+    const p = bet.model_probability
+    const q = 1 - p
+    const rawKellyFrac = b > 0 ? Math.max(0, (b * p - q) / b) : 0
+    const adjKellyFrac = rawKellyFrac * settings.kellyMultiplier
+
+    return (
+        <div className="ev-card-wrapper">
+            <div
+                className={`ev-card ${expanded ? 'ev-card-expanded' : ''}`}
+                onClick={onToggle}
+                style={{ cursor: 'pointer' }}
+            >
+                <div className="ev-match-info">
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                        {bet.home_team} vs {bet.away_team} · {new Date(bet.match_date?.split('.')[0]).toLocaleDateString()}
+                    </div>
+                    <div className="ev-market">{bet.market}</div>
+                    <div className="ev-match-title">{bet.selection}</div>
+                    <div className="ev-selection" style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginTop: '6px' }}>
+                        <span>Sharp: <strong className="neon-cyan-text">{sharpPct.toFixed(1)}%</strong></span>
+                        <span style={{ color: 'var(--text-secondary)' }}>Implied: {impliedPct.toFixed(1)}%</span>
+                        <span style={{ color: '#00ff88', fontSize: '0.85rem' }}>Edge: +{edge.toFixed(1)}pp</span>
+                        {stake > 0 && <span style={{ color: '#8884d8' }}>Kelly: <strong>${stake.toFixed(2)}</strong></span>}
+                    </div>
+                </div>
+
+                <div className="ev-odds-col">
+                    <div className="ev-odds">{bet.bookmaker_odds.toFixed(2)}</div>
+                    <div className="ev-bookie">{bet.bookmaker}</div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                    <div className="ev-percentage">+{bet.ev_percentage}%</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                        {expanded ? 'hide calc' : 'show calc'}
+                    </div>
+                </div>
+            </div>
+
+            {expanded && (
+                <div className="bet-breakdown">
+                    <div className="breakdown-header">How This Edge Was Found</div>
+
+                    <div className="breakdown-grid">
+                        {/* Step 1 */}
+                        <div className="breakdown-step">
+                            <div className="step-label">Step 1 — Devigging Sharp Books</div>
+                            <p className="step-desc">
+                                Each sharp book's raw implied probability (1/odds) includes their margin.
+                                Dividing by the sum of all their outcomes' implied probs removes that margin,
+                                giving a "true" probability per book. These are then averaged.
+                            </p>
+                            <div className="step-books">
+                                {['Betfair', 'Pinnacle', 'LowVig.ag', 'BetOnline.ag', 'Circa Sports'].map(bk => (
+                                    <span key={bk} className="book-pill book-pill-sharp">{bk}</span>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Step 2 */}
+                        <div className="breakdown-step">
+                            <div className="step-label">Step 2 — Sharp Consensus Probability</div>
+                            <div className="formula-box">p = avg(devigged probs from sharp books)</div>
+                            <div className="calc-row">
+                                <span className="calc-label">Sharp consensus probability</span>
+                                <span className="calc-value neon-cyan-text">{sharpPct.toFixed(3)}%</span>
+                            </div>
+                            <div className="calc-row">
+                                <span className="calc-label">This book's raw implied (1 ÷ {bet.bookmaker_odds.toFixed(2)})</span>
+                                <span className="calc-value">{impliedPct.toFixed(3)}%</span>
+                            </div>
+                            <div className="calc-row" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '8px', marginTop: '4px' }}>
+                                <span className="calc-label">Probability edge</span>
+                                <span className="calc-value" style={{ color: '#00ff88' }}>+{edge.toFixed(3)}pp</span>
+                            </div>
+                        </div>
+
+                        {/* Step 3 */}
+                        <div className="breakdown-step">
+                            <div className="step-label">Step 3 — Expected Value</div>
+                            <div className="formula-box">EV = (p × odds − 1) × 100</div>
+                            <div className="calc-row">
+                                <span className="calc-label">= ({p.toFixed(4)} × {bet.bookmaker_odds.toFixed(2)} − 1) × 100</span>
+                                <span className="calc-value" style={{ color: 'var(--accent-primary)' }}>+{bet.ev_percentage}%</span>
+                            </div>
+                            <p className="step-desc" style={{ marginTop: '8px' }}>
+                                For every $100 wagered at these odds, the expected return is ${(100 + bet.ev_percentage).toFixed(2)} — a ${bet.ev_percentage.toFixed(2)} average profit.
+                            </p>
+                        </div>
+
+                        {/* Step 4 */}
+                        <div className="breakdown-step">
+                            <div className="step-label">Step 4 — Kelly Stake</div>
+                            <div className="formula-box">f = (b·p − q) / b &nbsp;·&nbsp; multiplier &nbsp;·&nbsp; bankroll</div>
+                            <div className="calc-row">
+                                <span className="calc-label">b = odds − 1 = {bet.bookmaker_odds.toFixed(2)} − 1</span>
+                                <span className="calc-value">{b.toFixed(4)}</span>
+                            </div>
+                            <div className="calc-row">
+                                <span className="calc-label">p = {(p * 100).toFixed(2)}%,  q = 1 − p = {(q * 100).toFixed(2)}%</span>
+                            </div>
+                            <div className="calc-row">
+                                <span className="calc-label">Raw Kelly fraction = ({b.toFixed(3)}·{p.toFixed(4)} − {q.toFixed(4)}) / {b.toFixed(3)}</span>
+                                <span className="calc-value">{(rawKellyFrac * 100).toFixed(2)}%</span>
+                            </div>
+                            <div className="calc-row">
+                                <span className="calc-label">× {settings.kellyMultiplier}x multiplier × ${settings.bankroll.toLocaleString()} bankroll</span>
+                                <span className="calc-value" style={{ color: '#8884d8', fontWeight: 700 }}>${stake.toFixed(2)}</span>
+                            </div>
+                            <div className="calc-row" style={{ borderTop: '1px solid var(--border-color)', paddingTop: '8px', marginTop: '4px' }}>
+                                <span className="calc-label">Adjusted Kelly fraction</span>
+                                <span className="calc-value" style={{ color: '#8884d8' }}>{(adjKellyFrac * 100).toFixed(2)}% of bankroll</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
