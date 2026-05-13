@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from collections import defaultdict
 import models
 import schemas
 from database import engine, SessionLocal
@@ -35,6 +36,144 @@ def get_db():
     finally:
         db.close()
 
+EV_THRESHOLD_PERCENT = 5.0
+
+def parse_commence_time(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+def decimal_odds(value):
+    try:
+        odds = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if odds <= 1.0:
+        return None
+    return odds
+
+def calculate_ev_percentage(model_probability, bookmaker_odds):
+    try:
+        probability = float(model_probability)
+        odds = float(bookmaker_odds)
+    except (TypeError, ValueError):
+        return None
+
+    if probability < 0.0 or probability > 1.0 or odds <= 1.0:
+        return None
+
+    return round(((probability * odds) - 1.0) * 100, 2)
+
+def line_bucket(market, point):
+    if point is None:
+        return None
+
+    try:
+        value = float(point)
+    except (TypeError, ValueError):
+        return str(point)
+
+    if market == 'spreads':
+        value = abs(value)
+
+    return round(value, 2)
+
+def point_identity(point):
+    if point is None:
+        return None
+
+    try:
+        return round(float(point), 2)
+    except (TypeError, ValueError):
+        return str(point)
+
+def bookmaker_market_key(odd):
+    market = odd.get('market')
+    return (
+        odd.get('home_team'),
+        odd.get('away_team'),
+        odd.get('bookmaker'),
+        market,
+        line_bucket(market, odd.get('point'))
+    )
+
+def outcome_key(odd):
+    return (
+        odd.get('home_team'),
+        odd.get('away_team'),
+        odd.get('market'),
+        odd.get('selection'),
+        point_identity(odd.get('point'))
+    )
+
+def build_consensus_probabilities(parsed_odds):
+    by_book_market = defaultdict(list)
+    consensus = defaultdict(list)
+
+    for odd in parsed_odds:
+        odds = decimal_odds(odd.get('odds'))
+        if odds is None:
+            continue
+
+        by_book_market[bookmaker_market_key(odd)].append((odd, 1 / odds))
+
+    for outcomes in by_book_market.values():
+        if len(outcomes) < 2:
+            continue
+
+        raw_total = sum(raw_probability for _, raw_probability in outcomes)
+        if raw_total <= 0:
+            continue
+
+        for odd, raw_probability in outcomes:
+            consensus[outcome_key(odd)].append((
+                odd.get('bookmaker'),
+                raw_probability / raw_total
+            ))
+
+    return consensus
+
+def get_consensus_probability(odd, consensus):
+    market_probs = consensus.get(outcome_key(odd), [])
+    if not market_probs:
+        return None
+
+    other_books = [
+        probability for bookmaker, probability in market_probs
+        if bookmaker != odd.get('bookmaker')
+    ]
+    probabilities = other_books or [probability for _, probability in market_probs]
+
+    return sum(probabilities) / len(probabilities)
+
+def get_or_create_match(db, home_team, away_team, commence_time=None):
+    match = db.query(models.Match).filter(
+        models.Match.home_team == home_team,
+        models.Match.away_team == away_team,
+        models.Match.status == "upcoming"
+    ).first()
+
+    if match:
+        return match
+
+    venues = ["TD Garden", "Crypto.com Arena", "Ball Arena", "Kaseya Center", "Chase Center"]
+    match = models.Match(
+        home_team=home_team,
+        away_team=away_team,
+        venue=random.choice(venues),
+        match_date=commence_time or datetime.datetime.utcnow() + datetime.timedelta(days=1),
+        status="upcoming"
+    )
+    db.add(match)
+    db.commit()
+    db.refresh(match)
+    return match
+
 # Seed Database
 def seed_database(db: Session):
     if db.query(models.Match).count() == 0:
@@ -49,15 +188,11 @@ def seed_database(db: Session):
                 match_key = f"{odd['home_team']} _ {odd['away_team']}"
                 if match_key not in unique_matches:
                     
-                    # Try to parse the real commence time if available 
-                    match_time = datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 4))
-                    if odd.get('commence_time'):
-                        try:
-                            # The Odds API returns ISO 8601 (e.g. 2026-03-01T00:13:00Z)
-                            date_str = odd['commence_time'].replace('Z', '+00:00')
-                            match_time = datetime.datetime.fromisoformat(date_str)
-                        except Exception:
-                            pass
+                    # Try to parse the real commence time if available.
+                    match_time = (
+                        parse_commence_time(odd.get('commence_time')) or
+                        datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 4))
+                    )
                             
                     unique_matches[match_key] = {
                         "h_team": odd['home_team'],
@@ -73,57 +208,31 @@ def seed_database(db: Session):
         # Fallback if the API fails or returns nothing
         if not upcoming_matches:
             teams = ["Boston Celtics", "Miami Heat", "Los Angeles Lakers", "Golden State Warriors", "Denver Nuggets", "Phoenix Suns", "Milwaukee Bucks", "Philadelphia 76ers"]
-            upcoming_matches = [{"h_team": random.sample(teams, 2)[0], "a_team": random.sample(teams, 2)[1], "commence_time": datetime.datetime.utcnow() + datetime.timedelta(days=1)} for _ in range(5)]
-
-        venues = ["TD Garden", "Crypto.com Arena", "Ball Arena", "Kaseya Center", "Chase Center"]
-        bookmakers = ["DraftKings", "FanDuel", "BetMGM", "Caesars"]
+            upcoming_matches = []
+            for _ in range(5):
+                h_team, a_team = random.sample(teams, 2)
+                upcoming_matches.append({
+                    "h_team": h_team,
+                    "a_team": a_team,
+                    "commence_time": datetime.datetime.utcnow() + datetime.timedelta(days=1)
+                })
 
         for match_data in upcoming_matches:
-            h_team = match_data["h_team"]
-            a_team = match_data["a_team"]
-            match_time = match_data.get("commence_time", datetime.datetime.utcnow() + datetime.timedelta(days=1))
-            
-            match = models.Match(
-                home_team=h_team,
-                away_team=a_team,
-                venue=random.choice(venues),
-                match_date=match_time,
-                status="upcoming"
+            get_or_create_match(
+                db,
+                match_data["h_team"],
+                match_data["a_team"],
+                match_data.get("commence_time")
             )
-            db.add(match)
-            db.commit()
-            db.refresh(match)
-            
-            # Predict some mock bets for this match initially (will be overwritten by simulation)
-            for _ in range(random.randint(2, 5)):
-                bookmaker = random.choice(bookmakers)
-                bookmaker_odds = round(random.uniform(1.5, 4.0), 2)
-                model_probability = round(random.uniform(0.3, 0.8), 2)
-                
-                ev = (model_probability * bookmaker_odds) - 1.0
-                ev_percentage = round(ev * 100, 2)
-                
-                is_value = ev_percentage > 5.0
-                
-                if is_value:
-                    bet = models.Bet(
-                        match_id=match.id,
-                        market=random.choice(["H2H", "Line", "Total Points", "Player Props"]),
-                        selection=random.choice([h_team, a_team, "Over 220.5", "Under 220.5", "Jayson Tatum 25+ Points"]),
-                        bookmaker_odds=bookmaker_odds,
-                        model_probability=model_probability,
-                        ev_percentage=ev_percentage,
-                        is_value_bet=is_value,
-                        bookmaker=bookmaker
-                    )
-                    db.add(bet)
-        db.commit()
 
 @app.on_event("startup")
 async def startup_event():
     db = SessionLocal()
-    seed_database(db)
-    db.close()
+    try:
+        seed_database(db)
+        simulate_new_data(db)
+    finally:
+        db.close()
 
 @app.get("/api/matches", response_model=list[schemas.Match])
 def get_matches(db: Session = Depends(get_db)):
@@ -163,89 +272,58 @@ def simulate_new_data(db: Session):
     db.query(models.Bet).delete()
     db.commit()
 
-    # Retrieve mock odds (or real if API key set)
+    # Retrieve live odds when configured; otherwise use deterministic mock odds.
     live_odds = odds_api.fetch_live_odds()
     parsed_odds = odds_api.parse_odds(live_odds)
-    
-    mc_cache = {}
-    
-    # Process each live odd with our ML Engine instead of random data
+
+    if not parsed_odds:
+        return
+
+    consensus = build_consensus_probabilities(parsed_odds)
+    model_ready = ml_engine.is_model_ready()
+    h2h_probability_cache = {}
+
     for odd in parsed_odds:
         h_team = odd['home_team']
         a_team = odd['away_team']
-        
-        match_key = f"{h_team}_{a_team}"
-        if match_key not in mc_cache:
-            mc_cache[match_key] = ml_engine.run_monte_carlo_simulation(h_team, a_team, "TD Garden", num_simulations=5000)
-            
-        mc = mc_cache[match_key]
-        
         market = odd['market']
         selection = odd['selection']
-        bookmaker_odds = float(odd['odds'])
+        bookmaker_odds = decimal_odds(odd.get('odds'))
         point = odd.get('point')
-        
-        model_probability = 0.0
-        
-        if market == 'h2h':
+
+        if bookmaker_odds is None:
+            continue
+
+        model_probability = None
+
+        if market == 'h2h' and model_ready:
+            match_key = f"{h_team}_{a_team}"
+            if match_key not in h2h_probability_cache:
+                h2h_probability_cache[match_key] = ml_engine.predict_match(h_team, a_team, "Home Court")
+
+            probabilities = h2h_probability_cache[match_key]
             if selection == h_team:
-                model_probability = mc['mc_home_prob']
+                model_probability = probabilities['home_prob']
             else:
-                model_probability = mc['mc_away_prob']
-                
-        elif market == 'totals':
-            point_val = float(point) if point else 220.5
-            over_count = sum(1 for pts in mc['total_points_list'] if pts > point_val)
-            over_prob = over_count / len(mc['total_points_list'])
-            
-            if 'Over' in str(selection):
-                model_probability = over_prob
-            else:
-                model_probability = 1.0 - over_prob
-                
-        elif market == 'spreads':
-            point_val = float(point) if point else 0.0
-            
-            if selection == h_team:
-                cover_count = sum(1 for margin in mc['home_margins'] if margin + point_val > 0)
-            else:
-                cover_count = sum(1 for margin in mc['home_margins'] if margin - point_val < 0)
-                
-            model_probability = cover_count / len(mc['home_margins'])
-            
-        else:
-            model_probability = random.uniform(0.4, 0.6) # Uncategorized markets
-            
-        implied_prob = 1 / bookmaker_odds
-        
-        # Calculate +EV
-        ev = (model_probability * bookmaker_odds) - 1.0
-        ev_percentage = round(ev * 100, 2)
-        
-        is_value = ev_percentage > 5.0
+                model_probability = probabilities['away_prob']
+
+        if model_probability is None:
+            model_probability = get_consensus_probability(odd, consensus)
+
+        ev_percentage = calculate_ev_percentage(model_probability, bookmaker_odds)
+        if ev_percentage is None:
+            continue
+
+        is_value = ev_percentage > EV_THRESHOLD_PERCENT
         
         if is_value:
-            # Check if we have an active match for these teams
-            match = db.query(models.Match).filter(
-                models.Match.home_team == h_team, 
-                models.Match.away_team == a_team,
-                models.Match.status == "upcoming"
-            ).first()
-            
-            # If the match wasn't initially seeded but is in the live odds feed, create it dynamically
-            if not match:
-                venues = ["TD Garden", "Crypto.com Arena", "Ball Arena", "Kaseya Center", "Chase Center"]
-                match = models.Match(
-                    home_team=h_team,
-                    away_team=a_team,
-                    venue=random.choice(venues),
-                    match_date=datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 7)),
-                    status="upcoming"
-                )
-                db.add(match)
-                db.commit()
-                db.refresh(match)
-                
+            match = get_or_create_match(
+                db,
+                h_team,
+                a_team,
+                parse_commence_time(odd.get('commence_time'))
+            )
+
             if match:
                 final_selection = selection
                 if point and market in ['totals', 'spreads']:
@@ -260,7 +338,7 @@ def simulate_new_data(db: Session):
                     market=market,
                     selection=final_selection,
                     bookmaker_odds=bookmaker_odds,
-                    model_probability=round(model_probability, 3),
+                    model_probability=round(float(model_probability), 3),
                     ev_percentage=ev_percentage,
                     is_value_bet=is_value,
                     bookmaker=odd['bookmaker']
@@ -269,8 +347,15 @@ def simulate_new_data(db: Session):
                 
     db.commit()
 
+def simulate_new_data_task():
+    db = SessionLocal()
+    try:
+        simulate_new_data(db)
+    finally:
+        db.close()
+
 @app.post("/api/run-simulation")
-def trigger_simulation(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def trigger_simulation(background_tasks: BackgroundTasks):
     """Triggers the Monte Carlo simulation to find new lines"""
-    background_tasks.add_task(simulate_new_data, db)
-    return {"message": "Simulation started. Running millions of iterations in the background..."}
+    background_tasks.add_task(simulate_new_data_task)
+    return {"message": "Simulation started. Refreshing odds and value calculations in the background..."}
