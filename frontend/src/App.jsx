@@ -12,7 +12,7 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="logo-dot"></div>
-          NBA Quant
+          NBA Quant <span style={{ fontSize: '0.7em', color: 'var(--accent-primary)', marginLeft: '4px' }}>V2</span>
         </div>
 
         <nav>

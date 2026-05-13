@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, BackgroundTasks
+from fastapi import FastAPI, Depends, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from collections import defaultdict
@@ -12,7 +12,7 @@ import odds_api
 
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="NBA +EV Betting Model")
+app = FastAPI(title="NBA +EV Betting Model V2")
 
 # Configure CORS
 origins = [
@@ -36,7 +36,66 @@ def get_db():
     finally:
         db.close()
 
-EV_THRESHOLD_PERCENT = 2.5
+# Lowered to 1.0% — sharp-consensus methodology surfaces real but small edges;
+# 5%+ doesn't exist in efficient NBA markets except as model artifacts.
+EV_THRESHOLD_PERCENT = 1.0
+
+# Books considered "sharp" — low margin, high liquidity, reflect informed money.
+# Used to compute the reference probability that other books are scored against.
+SHARP_BOOKS = {
+    "Betfair",        # Exchange — peer-to-peer, ~0.5% vig
+    "Pinnacle",       # Sharpest traditional book (if surfaced by The Odds API)
+    "LowVig.ag",      # Explicit low-vig offshore book
+    "BetOnline.ag",   # Sharp offshore book
+    "Circa Sports",   # Sharp Vegas operator
+}
+
+# Real NBA home venues — replaces the previous random venue picker.
+TEAM_VENUES = {
+    "Atlanta Hawks": "State Farm Arena",
+    "Boston Celtics": "TD Garden",
+    "Brooklyn Nets": "Barclays Center",
+    "Charlotte Hornets": "Spectrum Center",
+    "Chicago Bulls": "United Center",
+    "Cleveland Cavaliers": "Rocket Mortgage FieldHouse",
+    "Dallas Mavericks": "American Airlines Center",
+    "Denver Nuggets": "Ball Arena",
+    "Detroit Pistons": "Little Caesars Arena",
+    "Golden State Warriors": "Chase Center",
+    "Houston Rockets": "Toyota Center",
+    "Indiana Pacers": "Gainbridge Fieldhouse",
+    "LA Clippers": "Intuit Dome",
+    "Los Angeles Clippers": "Intuit Dome",
+    "Los Angeles Lakers": "Crypto.com Arena",
+    "Memphis Grizzlies": "FedExForum",
+    "Miami Heat": "Kaseya Center",
+    "Milwaukee Bucks": "Fiserv Forum",
+    "Minnesota Timberwolves": "Target Center",
+    "New Orleans Pelicans": "Smoothie King Center",
+    "New York Knicks": "Madison Square Garden",
+    "Oklahoma City Thunder": "Paycom Center",
+    "Orlando Magic": "Kia Center",
+    "Philadelphia 76ers": "Wells Fargo Center",
+    "Phoenix Suns": "PHX Arena",
+    "Portland Trail Blazers": "Moda Center",
+    "Sacramento Kings": "Golden 1 Center",
+    "San Antonio Spurs": "Frost Bank Center",
+    "Toronto Raptors": "Scotiabank Arena",
+    "Utah Jazz": "Delta Center",
+    "Washington Wizards": "Capital One Arena",
+}
+
+# NBA-specific half-point probability conversions, approximated from
+# published margin-of-victory distributions. Used to value better lines on
+# spreads/totals when comparing books offering different points.
+SPREAD_HALF_POINT_VALUE = {
+    # spread magnitude -> probability gained per +0.5 to the underdog side
+    1.0: 0.030, 1.5: 0.025, 2.0: 0.022, 2.5: 0.020, 3.0: 0.045,  # 3 is key
+    3.5: 0.025, 4.0: 0.020, 4.5: 0.020, 5.0: 0.020, 5.5: 0.020,
+    6.0: 0.022, 6.5: 0.045, 7.0: 0.045, 7.5: 0.025, 8.0: 0.018,  # 7 is key
+    8.5: 0.018, 9.0: 0.022, 9.5: 0.020, 10.0: 0.025, 10.5: 0.018,
+    11.0: 0.015, 11.5: 0.012, 12.0: 0.012,
+}
 
 def parse_commence_time(value):
     if not value:
@@ -68,6 +127,22 @@ def calculate_ev_percentage(model_probability, bookmaker_odds):
         return None
 
     return round(((probability * odds) - 1.0) * 100, 2)
+
+def kelly_fraction(probability, odds, multiplier=1.0):
+    """Fraction of bankroll the Kelly criterion recommends staking. Returns 0
+    for non-positive edge so it never recommends bets without value."""
+    try:
+        p = float(probability)
+        b = float(odds) - 1.0
+    except (TypeError, ValueError):
+        return 0.0
+    if b <= 0 or p <= 0 or p >= 1:
+        return 0.0
+    q = 1 - p
+    frac = (b * p - q) / b
+    if frac <= 0:
+        return 0.0
+    return round(frac * multiplier, 4)
 
 def line_bucket(market, point):
     if point is None:
@@ -111,45 +186,109 @@ def outcome_key(odd):
         point_identity(odd.get('point'))
     )
 
-def build_consensus_probabilities(parsed_odds):
+def devigged_probabilities(parsed_odds):
+    """Per (game, book, market, line) group, devig the outcomes proportionally.
+    Returns list of (odd, devigged_probability) tuples grouped by outcome_key."""
     by_book_market = defaultdict(list)
-    consensus = defaultdict(list)
-
     for odd in parsed_odds:
         odds = decimal_odds(odd.get('odds'))
         if odds is None:
             continue
-
         by_book_market[bookmaker_market_key(odd)].append((odd, 1 / odds))
 
+    out = defaultdict(list)
     for outcomes in by_book_market.values():
         if len(outcomes) < 2:
             continue
-
-        raw_total = sum(raw_probability for _, raw_probability in outcomes)
+        raw_total = sum(raw for _, raw in outcomes)
         if raw_total <= 0:
             continue
+        for odd, raw in outcomes:
+            out[outcome_key(odd)].append((odd.get('bookmaker'), raw / raw_total))
+    return out
 
-        for odd, raw_probability in outcomes:
-            consensus[outcome_key(odd)].append((
-                odd.get('bookmaker'),
-                raw_probability / raw_total
-            ))
+def get_sharp_probability(odd, sharp_devigged, fallback_devigged):
+    """Return the sharp-book consensus probability for this outcome. Falls back
+    to all-book consensus when no sharp books quote this market."""
+    key = outcome_key(odd)
+    sharp = sharp_devigged.get(key, [])
+    # Exclude the book being evaluated to avoid self-referential EV.
+    own = odd.get('bookmaker')
+    other_sharp = [p for bm, p in sharp if bm != own]
+    if other_sharp:
+        return sum(other_sharp) / len(other_sharp), "sharp_consensus"
 
-    return consensus
+    # No sharp book quote — use the broader consensus minus the own book.
+    all_probs = fallback_devigged.get(key, [])
+    other = [p for bm, p in all_probs if bm != own]
+    if other:
+        return sum(other) / len(other), "market_consensus"
+    return None, None
 
-def get_consensus_probability(odd, consensus):
-    market_probs = consensus.get(outcome_key(odd), [])
-    if not market_probs:
-        return None
+def best_line_adjusted_probability(odd, sharp_devigged, fallback_devigged):
+    """For spreads/totals, when the offered line differs from sharp-book lines,
+    adjust the sharp probability by the value of the line difference."""
+    market = odd.get('market')
+    if market not in ('spreads', 'totals'):
+        return None, None
+    own_point = point_identity(odd.get('point'))
+    if own_point is None:
+        return None, None
 
-    other_books = [
-        probability for bookmaker, probability in market_probs
-        if bookmaker != odd.get('bookmaker')
-    ]
-    probabilities = other_books or [probability for _, probability in market_probs]
+    # Gather sharp probabilities for the same selection at any line.
+    own = odd.get('bookmaker')
+    matching_lines = []
+    for key, probs in sharp_devigged.items():
+        h, a, mkt, sel, pt = key
+        if (h == odd.get('home_team') and a == odd.get('away_team')
+                and mkt == market and sel == odd.get('selection') and pt is not None):
+            for bm, p in probs:
+                if bm != own:
+                    matching_lines.append((pt, p))
 
-    return sum(probabilities) / len(probabilities)
+    if not matching_lines:
+        return None, None
+
+    # Pick the closest line to the offered one.
+    closest_line, closest_prob = min(matching_lines, key=lambda x: abs(x[0] - own_point))
+    line_diff = own_point - closest_line
+
+    if abs(line_diff) < 0.01:
+        return closest_prob, "sharp_consensus"
+
+    if market == 'spreads':
+        # For spreads, positive line_diff for the underdog side increases win prob.
+        # Selection name is a team; check spread sign to determine direction.
+        try:
+            offered = float(odd.get('point'))
+        except (TypeError, ValueError):
+            return closest_prob, "sharp_consensus"
+        # Probability gain per 0.5 points moved toward the side being bet.
+        steps = abs(line_diff) / 0.5
+        mag_avg = (abs(own_point) + abs(closest_line)) / 2
+        bucket = round(mag_avg * 2) / 2  # nearest 0.5
+        per_half = SPREAD_HALF_POINT_VALUE.get(bucket, 0.020)
+        # If offered point is more favorable (more points) than the reference,
+        # probability goes up. We assume "more points for the named team" means
+        # the team is getting better odds — line_diff > 0 means more points.
+        direction = 1 if line_diff > 0 else -1
+        adjusted = closest_prob + (direction * steps * per_half)
+    else:  # totals
+        # For totals, moving the total down increases Under prob and decreases Over.
+        steps = abs(line_diff) / 0.5
+        per_half = 0.020  # NBA totals are ~2% per half-point on average
+        selection = (odd.get('selection') or '').lower()
+        if 'over' in selection:
+            direction = -1 if line_diff > 0 else 1  # higher total = lower Over prob
+        else:
+            direction = 1 if line_diff > 0 else -1  # higher total = higher Under prob
+        adjusted = closest_prob + (direction * steps * per_half)
+
+    adjusted = max(0.01, min(0.99, adjusted))
+    return adjusted, "sharp_consensus_adjusted"
+
+def resolve_venue(home_team):
+    return TEAM_VENUES.get(home_team) or "TBD"
 
 def get_or_create_match(db, home_team, away_team, commence_time=None):
     match = db.query(models.Match).filter(
@@ -159,13 +298,18 @@ def get_or_create_match(db, home_team, away_team, commence_time=None):
     ).first()
 
     if match:
+        # Backfill correct venue if a previous seed wrote a placeholder.
+        correct_venue = resolve_venue(home_team)
+        if match.venue != correct_venue and correct_venue != "TBD":
+            match.venue = correct_venue
+            db.commit()
+            db.refresh(match)
         return match
 
-    venues = ["TD Garden", "Crypto.com Arena", "Ball Arena", "Kaseya Center", "Chase Center"]
     match = models.Match(
         home_team=home_team,
         away_team=away_team,
-        venue=random.choice(venues),
+        venue=resolve_venue(home_team),
         match_date=commence_time or datetime.datetime.utcnow() + datetime.timedelta(days=1),
         status="upcoming"
     )
@@ -181,30 +325,30 @@ def seed_database(db: Session):
         try:
             live_odds = odds_api.fetch_live_odds()
             parsed_odds = odds_api.parse_odds(live_odds)
-            
+
             # Extract unique upcoming games from the odds feed
             unique_matches = {}
             for odd in parsed_odds:
                 match_key = f"{odd['home_team']} _ {odd['away_team']}"
                 if match_key not in unique_matches:
-                    
+
                     # Try to parse the real commence time if available.
                     match_time = (
                         parse_commence_time(odd.get('commence_time')) or
                         datetime.datetime.utcnow() + datetime.timedelta(days=random.randint(1, 4))
                     )
-                            
+
                     unique_matches[match_key] = {
                         "h_team": odd['home_team'],
                         "a_team": odd['away_team'],
                         "commence_time": match_time
                     }
-                    
+
             upcoming_matches = list(unique_matches.values())
         except Exception as e:
             print("Error parsing live odds for seeder:", e)
             upcoming_matches = []
-            
+
         # Fallback if the API fails or returns nothing
         if not upcoming_matches:
             teams = ["Boston Celtics", "Miami Heat", "Los Angeles Lakers", "Golden State Warriors", "Denver Nuggets", "Phoenix Suns", "Milwaukee Bucks", "Philadelphia 76ers"]
@@ -238,13 +382,66 @@ async def startup_event():
 def get_matches(db: Session = Depends(get_db)):
     return db.query(models.Match).all()
 
+@app.get("/api/matches/{match_id}/odds")
+def get_match_odds(match_id: int, db: Session = Depends(get_db)):
+    """Return every recorded bookmaker offer for a match, plus per-outcome
+    sharp consensus and best price. Powers the Matches detail view."""
+    match = db.query(models.Match).filter(models.Match.id == match_id).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    bets = db.query(models.Bet).filter(models.Bet.match_id == match_id).all()
+
+    # Group bets by (market, selection) for compact display.
+    by_outcome = defaultdict(list)
+    for bet in bets:
+        by_outcome[(bet.market, bet.selection)].append({
+            "bookmaker": bet.bookmaker,
+            "odds": bet.bookmaker_odds,
+            "ev_percentage": bet.ev_percentage,
+            "is_value_bet": bet.is_value_bet,
+            "model_probability": bet.model_probability,
+            "implied_probability": round(1.0 / bet.bookmaker_odds, 4) if bet.bookmaker_odds else None,
+        })
+
+    outcomes = []
+    for (market, selection), books in by_outcome.items():
+        # Best price = highest decimal odds available.
+        best = max(books, key=lambda b: b["odds"])
+        # Sharp consensus is the same model_probability across rows (sharp-derived);
+        # take the median to be robust against any outliers.
+        probs = sorted(b["model_probability"] for b in books if b["model_probability"] is not None)
+        sharp_prob = probs[len(probs)//2] if probs else None
+        outcomes.append({
+            "market": market,
+            "selection": selection,
+            "sharp_probability": sharp_prob,
+            "best_price": best["odds"],
+            "best_book": best["bookmaker"],
+            "books": sorted(books, key=lambda b: -b["odds"]),
+        })
+
+    outcomes.sort(key=lambda o: (o["market"], o["selection"]))
+
+    return {
+        "match": {
+            "id": match.id,
+            "home_team": match.home_team,
+            "away_team": match.away_team,
+            "venue": match.venue,
+            "match_date": match.match_date,
+            "status": match.status,
+        },
+        "outcomes": outcomes,
+    }
+
 @app.get("/api/bets/ev", response_model=list[schemas.Bet])
 def get_ev_bets(db: Session = Depends(get_db)):
     ev_bets = db.query(models.Bet, models.Match)\
                 .join(models.Match, models.Bet.match_id == models.Match.id)\
                 .filter(models.Bet.is_value_bet == True)\
                 .order_by(models.Bet.ev_percentage.desc()).all()
-    
+
     out = []
     for bet, match in ev_bets:
         bet_data = bet.__dict__.copy()
@@ -252,7 +449,7 @@ def get_ev_bets(db: Session = Depends(get_db)):
         bet_data["home_team"] = match.home_team
         bet_data["away_team"] = match.away_team
         out.append(bet_data)
-        
+
     return out
 
 @app.get("/api/stats", response_model=schemas.DashboardStats)
@@ -272,84 +469,79 @@ def simulate_new_data(db: Session):
     db.query(models.Bet).delete()
     db.commit()
 
-    # Retrieve live odds when configured; otherwise use deterministic mock odds.
     live_odds = odds_api.fetch_live_odds()
     parsed_odds = odds_api.parse_odds(live_odds)
-
     if not parsed_odds:
         return
 
-    # Exclude lay markets before building consensus — lay odds use different
-    # probability semantics and pollute the devigged consensus for back bets.
+    # Strip lay markets — lay-price probabilities aren't directly comparable
+    # to back-price EV and contaminate consensus calculations.
     back_odds = [o for o in parsed_odds if 'lay' not in o.get('market', '')]
-    consensus = build_consensus_probabilities(back_odds)
-    h2h_probability_cache = {}
 
+    # Devigged probabilities split two ways: from sharp books only, and from
+    # all books as a fallback when no sharp book quotes a particular outcome.
+    sharp_odds = [o for o in back_odds if o.get('bookmaker') in SHARP_BOOKS]
+    sharp_devigged = devigged_probabilities(sharp_odds)
+    all_devigged = devigged_probabilities(back_odds)
+
+    persisted = 0
     for odd in back_odds:
-        h_team = odd['home_team']
-        a_team = odd['away_team']
-        market = odd['market']
-        selection = odd['selection']
         bookmaker_odds = decimal_odds(odd.get('odds'))
-        point = odd.get('point')
-
         if bookmaker_odds is None:
             continue
 
-        model_probability = None
+        # Try direct sharp consensus first (same line).
+        model_probability, source = get_sharp_probability(odd, sharp_devigged, all_devigged)
 
-        # Always use the ML model for h2h — predict_match has its own fallback
-        # (deterministic hash-seeded baseline) when the trained model isn't ready.
-        if market == 'h2h':
-            match_key = f"{h_team}_{a_team}"
-            if match_key not in h2h_probability_cache:
-                h2h_probability_cache[match_key] = ml_engine.predict_match(h_team, a_team, "Home Court")
-
-            probabilities = h2h_probability_cache[match_key]
-            if selection == h_team:
-                model_probability = probabilities['home_prob']
-            else:
-                model_probability = probabilities['away_prob']
+        # For spreads/totals, also try cross-line value if no direct sharp price.
+        if model_probability is None or source == "market_consensus":
+            adjusted, adj_source = best_line_adjusted_probability(odd, sharp_devigged, all_devigged)
+            if adjusted is not None and (model_probability is None or adj_source.startswith("sharp")):
+                model_probability = adjusted
+                source = adj_source
 
         if model_probability is None:
-            model_probability = get_consensus_probability(odd, consensus)
+            continue
 
         ev_percentage = calculate_ev_percentage(model_probability, bookmaker_odds)
         if ev_percentage is None:
             continue
 
         is_value = ev_percentage > EV_THRESHOLD_PERCENT
-        
-        if is_value:
-            match = get_or_create_match(
-                db,
-                h_team,
-                a_team,
-                parse_commence_time(odd.get('commence_time'))
-            )
+        match = get_or_create_match(
+            db,
+            odd['home_team'],
+            odd['away_team'],
+            parse_commence_time(odd.get('commence_time'))
+        )
+        if not match:
+            continue
 
-            if match:
-                final_selection = selection
-                if point and market in ['totals', 'spreads']:
-                    if market == 'totals':
-                        final_selection = f"{selection} {point}"
-                    elif market == 'spreads':
-                        sign = "+" if float(point) > 0 else ""
-                        final_selection = f"{selection} {sign}{point}"
+        final_selection = odd['selection']
+        market = odd['market']
+        point = odd.get('point')
+        if point is not None and market in ('totals', 'spreads'):
+            if market == 'totals':
+                final_selection = f"{odd['selection']} {point}"
+            else:
+                sign = "+" if float(point) > 0 else ""
+                final_selection = f"{odd['selection']} {sign}{point}"
 
-                bet = models.Bet(
-                    match_id=match.id,
-                    market=market,
-                    selection=final_selection,
-                    bookmaker_odds=bookmaker_odds,
-                    model_probability=round(float(model_probability), 3),
-                    ev_percentage=ev_percentage,
-                    is_value_bet=is_value,
-                    bookmaker=odd['bookmaker']
-                )
-                db.add(bet)
-                
+        bet = models.Bet(
+            match_id=match.id,
+            market=market,
+            selection=final_selection,
+            bookmaker_odds=bookmaker_odds,
+            model_probability=round(float(model_probability), 4),
+            ev_percentage=ev_percentage,
+            is_value_bet=is_value,
+            bookmaker=odd['bookmaker']
+        )
+        db.add(bet)
+        persisted += 1
+
     db.commit()
+    print(f"Simulation complete: {persisted} bookmaker offerings recorded.")
 
 def simulate_new_data_task():
     db = SessionLocal()
@@ -360,6 +552,6 @@ def simulate_new_data_task():
 
 @app.post("/api/run-simulation")
 def trigger_simulation(background_tasks: BackgroundTasks):
-    """Triggers the Monte Carlo simulation to find new lines"""
+    """Refreshes odds and recomputes the sharp-consensus EV for every quote."""
     background_tasks.add_task(simulate_new_data_task)
-    return {"message": "Simulation started. Refreshing odds and value calculations in the background..."}
+    return {"message": "Refresh started. Pulling odds and recomputing sharp-consensus EV..."}
