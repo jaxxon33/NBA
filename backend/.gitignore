@@ -1,7 +1,12 @@
 venv/
 __pycache__/
-*.json
 *.pkl
 *.db
 .env
+# Exclude all JSON except the trained model
+*.json
+!nba_xgb_model.json
+# Exclude all CSV except committed data files
 *.csv
+!historical_games.csv
+!historical_teams.csv

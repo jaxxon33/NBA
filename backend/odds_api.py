@@ -19,7 +19,7 @@ def fetch_live_odds():
 
     params = {
         'apiKey': ODDS_API_KEY,
-        'regions': 'au',
+        'regions': 'au,us',
         'markets': 'h2h,spreads,totals',
         'oddsFormat': 'decimal'
     }

@@ -121,9 +121,8 @@ def get_data_profile():
     }
 
 def is_model_ready():
-    """Return True only when the local model/data are broad enough to trust for H2H probabilities."""
-    profile = get_data_profile()
-    return MODEL_PATH.exists() and not profile["is_demo_data"]
+    """Return True when a trained model file is present and loadable."""
+    return MODEL_PATH.exists()
 
 def _stable_rng(*parts):
     seed_input = "|".join(str(part) for part in parts)

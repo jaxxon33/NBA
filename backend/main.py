@@ -36,7 +36,7 @@ def get_db():
     finally:
         db.close()
 
-EV_THRESHOLD_PERCENT = 5.0
+EV_THRESHOLD_PERCENT = 2.5
 
 def parse_commence_time(value):
     if not value:
@@ -279,11 +279,13 @@ def simulate_new_data(db: Session):
     if not parsed_odds:
         return
 
-    consensus = build_consensus_probabilities(parsed_odds)
-    model_ready = ml_engine.is_model_ready()
+    # Exclude lay markets before building consensus — lay odds use different
+    # probability semantics and pollute the devigged consensus for back bets.
+    back_odds = [o for o in parsed_odds if 'lay' not in o.get('market', '')]
+    consensus = build_consensus_probabilities(back_odds)
     h2h_probability_cache = {}
 
-    for odd in parsed_odds:
+    for odd in back_odds:
         h_team = odd['home_team']
         a_team = odd['away_team']
         market = odd['market']
@@ -296,7 +298,9 @@ def simulate_new_data(db: Session):
 
         model_probability = None
 
-        if market == 'h2h' and model_ready:
+        # Always use the ML model for h2h — predict_match has its own fallback
+        # (deterministic hash-seeded baseline) when the trained model isn't ready.
+        if market == 'h2h':
             match_key = f"{h_team}_{a_team}"
             if match_key not in h2h_probability_cache:
                 h2h_probability_cache[match_key] = ml_engine.predict_match(h_team, a_team, "Home Court")
